@@ -193,49 +193,89 @@ void student_coo_matrix_to_bcsr_matrix(int mb, int nb, int bcs, int brs, coo_mat
     //                     for each row block.
 
     int worst_case_blocks = coo_src->nnz; // Worst case they are each in their own block
-    int *temp_row = (int *)calloc(worst_case_blocks, sizeof(int));
-    int *temp_col = (int *)calloc(worst_case_blocks, sizeof(int));
+    int *block_row_indices = (int *)calloc(worst_case_blocks, sizeof(int));
+    int *block_col_indices = (int *)calloc(worst_case_blocks, sizeof(int));
 
     // PASS 1: ...
     // bcsr_dst->nnz_blocks = ??;
+
+    int n_block_rows = 0;
+    int n_block_cols = 0;
     for (int i = 0; i < coo_src->nnz; i++) {
+      if (coo_src->values[i] == 0.f)
+        continue;
+
       // Which block would this element go into?
       int block_row = coo_src->row_idx[i] / mb;
       int block_col = coo_src->col_idx[i] / nb;
 
+      // Might be a better way to do this, but i need this info for how i calculate the value
+      // indices
+      n_block_rows = block_row ? block_row > n_block_rows : n_block_rows;
+      n_block_cols = block_col ? block_col > n_block_cols : n_block_cols;
+
+      // Just naively check if we've already collected this block
       bool found = false;
       for (int j = 0; j < bcsr_dst->nnz_blocks; j++) {
         // New block, just checking all of them collected thus far
-        if (temp_row[j] == block_row && temp_col[j] == block_col) {
+        if (block_row_indices[j] == block_row && block_col_indices[j] == block_col) {
           found = true;
           break;
         }
       }
 
+      // If not add it to the list
       if (!found) {
-        temp_row[bcsr_dst->nnz_blocks] = block_row;
-        temp_col[bcsr_dst->nnz_blocks] = block_col;
+        block_row_indices[bcsr_dst->nnz_blocks] = block_row;
+        block_col_indices[bcsr_dst->nnz_blocks] = block_col;
 
         bcsr_dst->nnz_blocks++;
       }
     }
 
+    // Since we want the actual number and not just the indices
+    n_block_rows++;
+    n_block_cols++;
+
     // Initialize the buffers
     // For the sake of the HW we will fill the unitialized values with zeros
-    bcsr_dst->block_row_idx = (int *)calloc(((bcsr_dst->m) / mb + 1), sizeof(int));
+    bcsr_dst->block_row_idx = (int *)calloc(((bcsr_dst->m / mb) + 1), sizeof(int));
     bcsr_dst->block_col_idx = (int *)calloc(bcsr_dst->nnz_blocks, sizeof(int));
     bcsr_dst->block_values = (float *)calloc(bcsr_dst->nnz_blocks * (mb * nb), sizeof(float));
 
-    memcpy(bcsr_dst->block_row_idx, temp_row, ((bcsr_dst->m) / mb + 1) * sizeof(int));
-    memcpy(bcsr_dst->block_col_idx, temp_col, bcsr_dst->nnz_blocks * sizeof(int));
-
-    free(temp_row);
-    free(temp_col);
-
     // PASS 2: find out how many non-zero blocks are in each block row and modify
     //         bcsr_dst->block_row_idx
+    bcsr_dst->block_row_idx[0] = 0; // Always
+
+    // Super inefficient I think
+    int *block_row_counts = (int *)calloc(n_block_rows, sizeof(int));
+
+    for (int i = 0; i < bcsr_dst->nnz_blocks; i++) {
+      int row = block_row_indices[i];
+      block_row_counts[row]++;
+    }
+
+    for (int i = 0; i <= n_block_rows; i++) {
+      bcsr_dst->block_row_idx[i] = bcsr_dst->block_row_idx[i - 1] + block_row_counts[i - 1];
+    }
+    free(block_row_indices);
+    free(block_col_indices);
+    free(block_row_counts);
 
     // PASS 3: Place the coo values into their right location in the bcsr matrix
+    for (int i = 0; i < coo_src->nnz; i++) {
+      // Which block would this element go into?
+      int block_row = coo_src->row_idx[i] / mb;
+      int block_col = coo_src->col_idx[i] / nb;
+
+      int internal_row = coo_src->row_idx[i] % mb;
+      int internal_col = coo_src->col_idx[i] % nb;
+
+      int block_offset = (block_row * n_block_cols + block_col);
+      bcsr_dst->block_col_idx[block_offset] = block_col;
+      int index_into_blocked = block_offset * (mb * nb) + (internal_row * nb + internal_col);
+      bcsr_dst->block_values[index_into_blocked] = coo_src->values[i];
+    }
   }
 }
 
@@ -307,8 +347,8 @@ void student_csr_matrix_to_csc_matrix(csr_matrix_t *csr_src, csc_matrix_t *csc_d
 
   // Initialize the buffers
   // For the sake of the HW we will fill the unitialized values with zeros
-  csc_dst->row_idx = (int *)calloc((csc_dst->m + 1), sizeof(int));
-  csc_dst->col_idx = (int *)calloc(csc_dst->nnz, sizeof(int));
+  csc_dst->row_idx = (int *)calloc((csc_dst->nnz), sizeof(int));
+  csc_dst->col_idx = (int *)calloc(csc_dst->n + 1, sizeof(int));
   csc_dst->values = (float *)calloc(csc_dst->nnz, sizeof(float));
 
   {
@@ -316,6 +356,36 @@ void student_csr_matrix_to_csc_matrix(csr_matrix_t *csr_src, csc_matrix_t *csc_d
     // STUDENT_TODO: Do not convert to a dense matrix then back to csr.
 
     // Most important hint you will receive: draw this out on paper first.
+
+    // Count how many times each column appears
+    for (int i = 0; i < csr_src->nnz; i++) {
+      csc_dst->col_idx[csr_src->col_idx[i] + 1]++;
+    }
+
+    // And now add up all the occurences, before this col index stored offset 1 to the right
+    for (int i = 1; i <= csc_dst->n; i++) {
+      csc_dst->col_idx[i] += csc_dst->col_idx[i - 1];
+    }
+
+    // Extract values from the csr, going by row
+    for (int r = 0; r < csr_src->m; r++) {
+      for (int i = csr_src->row_idx[r]; i < csr_src->row_idx[r + 1]; i++) {
+        int col = csr_src->col_idx[i];
+        int value_index = csc_dst->col_idx[col];
+
+        csc_dst->row_idx[value_index] = r;
+        csc_dst->values[value_index] = csr_src->values[i];
+
+        // Can use this temporarily
+        csc_dst->col_idx[col]++;
+      }
+    }
+
+    // Offsets back
+    for (int i = csc_dst->n; i > 0; i--) {
+      csc_dst->col_idx[i] = csc_dst->col_idx[i - 1];
+    }
+    csc_dst->col_idx[0] = 0;
   }
 }
 

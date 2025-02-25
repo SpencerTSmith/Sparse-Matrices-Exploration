@@ -4,7 +4,7 @@
 #
 
 CC=gcc
-CFLAGS= -std=c99 -g -O2 -fopenmp
+CFLAGS= -std=c99 -g -O0 -fopenmp
 
 run-local: build-local
 	./run-hw.x
